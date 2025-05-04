@@ -30,7 +30,7 @@ jobs:
         id: prep
         run: |
           REPO_LC=$(echo "${REPO}" | tr '[:upper:]' '[:lower:]')
-          echo "TAG=ghcr.io/${REPO_LC}:${TAG}" >> $GITHUB_ENV
+          echo "TAG=ghcr.io/${REPO_LC}:${TAG}-cpu" >> $GITHUB_ENV
         env:
           REPO: ${{ github.repository }}
           TAG: ${{ github.event.inputs.tag_name }}
