@@ -1,0 +1,8 @@
+# F5-TTS | E2-TTS
+model = "F5-TTS"
+ref_audio = "/app/ref_audios/english_lady_01.wav"
+ref_text = "one two three four five six seven eight nine ten, eleven, twelve, thirteen, fourteen, fifteen, sixteen, hello, good bye!"
+gen_text = "one two three four five six seven eight nine ten, eleven, twelve, thirteen, fourteen, fifteen, sixteen"
+remove_silence = false
+output_dir = "tests"
+output_file = "output.wav"
