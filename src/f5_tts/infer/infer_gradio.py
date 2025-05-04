@@ -90,7 +90,7 @@ chat_tokenizer_state = None
 
 
 @gpu_decorator
-def generate_response(messages, model, tokenizer):
+def chat_model_inference(messages, model, tokenizer):
     """Generate response using Qwen"""
     text = tokenizer.apply_chat_template(
         messages,
@@ -113,12 +113,23 @@ def generate_response(messages, model, tokenizer):
 
 
 @gpu_decorator
+def load_text_from_file(file):
+    if file:
+        with open(file, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+    else:
+        text = ""
+    return gr.update(value=text)
+
+
+@gpu_decorator
 def infer(
     ref_audio_orig,
     ref_text,
     gen_text,
     model,
     remove_silence,
+    seed,
     cross_fade_duration=0.15,
     nfe_step=32,
     speed=1,
@@ -128,8 +139,11 @@ def infer(
         gr.Warning("Please provide reference audio.")
         return gr.update(), gr.update(), ref_text
 
+    # Set inference seed
+    torch.manual_seed(seed)
+
     if not gen_text.strip():
-        gr.Warning("Please enter text to generate.")
+        gr.Warning("Please enter text to generate or upload a text file.")
         return gr.update(), gr.update(), ref_text
 
     ref_audio, ref_text = preprocess_ref_audio_text(ref_audio_orig, ref_text, show_info=show_info)
@@ -191,19 +205,38 @@ with gr.Blocks() as app_credits:
 with gr.Blocks() as app_tts:
     gr.Markdown("# Batched TTS")
     ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
-    gen_text_input = gr.Textbox(label="Text to Generate", lines=10)
+    with gr.Row():
+        gen_text_input = gr.Textbox(
+            label="Text to Generate",
+            lines=10,
+            max_lines=40,
+            scale=4,
+        )
+        gen_text_file = gr.File(label="Load Text to Generate from File (.txt)", file_types=[".txt"], scale=1)
     generate_btn = gr.Button("Synthesize", variant="primary")
     with gr.Accordion("Advanced Settings", open=False):
-        ref_text_input = gr.Textbox(
-            label="Reference Text",
-            info="Leave blank to automatically transcribe the reference audio. If you enter text it will override automatic transcription.",
-            lines=2,
-        )
-        remove_silence = gr.Checkbox(
-            label="Remove Silences",
-            info="The model tends to produce silences, especially on longer audio. We can manually remove silences if needed. Note that this is an experimental feature and may produce strange results. This will also increase generation time.",
-            value=False,
-        )
+        with gr.Row():
+            ref_text_input = gr.Textbox(
+                label="Reference Text",
+                info="Leave blank to automatically transcribe the reference audio. If you enter text or upload a file, it will override automatic transcription.",
+                lines=2,
+                scale=4,
+            )
+            ref_text_file = gr.File(label="Load Reference Text from File (.txt)", file_types=[".txt"], scale=1)
+        with gr.Row():
+            randomize_seed = gr.Checkbox(
+                label="Randomize Seed",
+                info="Check to use a random seed for each generation. Uncheck to use the seed specified.",
+                value=True,
+                scale=3,
+            )
+            seed_input = gr.Number(show_label=False, value=0, precision=0, scale=1)
+            with gr.Column(scale=4):
+                remove_silence = gr.Checkbox(
+                    label="Remove Silences",
+                    info="If undesired long silence(s) produced, turn on to automatically detect and crop.",
+                    value=False,
+                )
         speed_slider = gr.Slider(
             label="Speed",
             minimum=0.3,
@@ -238,21 +271,45 @@ with gr.Blocks() as app_tts:
         ref_text_input,
         gen_text_input,
         remove_silence,
+        randomize_seed,
+        seed_input,
         cross_fade_duration_slider,
         nfe_slider,
         speed_slider,
     ):
+        # Determine the seed to use
+        if randomize_seed:
+            seed = np.random.randint(0, 2**31 - 1)
+        else:
+            seed = seed_input
+            if seed < 0 or seed > 2**31 - 1:
+                gr.Warning("Seed must in range 0 ~ 2147483647. Using random seed instead.")
+                seed = np.random.randint(0, 2**31 - 1)
+
         audio_out, spectrogram_path, ref_text_out = infer(
             ref_audio_input,
             ref_text_input,
             gen_text_input,
             tts_model_choice,
             remove_silence,
+            seed=seed,
             cross_fade_duration=cross_fade_duration_slider,
             nfe_step=nfe_slider,
             speed=speed_slider,
         )
-        return audio_out, spectrogram_path, ref_text_out
+        return audio_out, spectrogram_path, ref_text_out, seed
+
+    gen_text_file.upload(
+        load_text_from_file,
+        inputs=[gen_text_file],
+        outputs=[gen_text_input],
+    )
+
+    ref_text_file.upload(
+        load_text_from_file,
+        inputs=[ref_text_file],
+        outputs=[ref_text_input],
+    )
 
     generate_btn.click(
         basic_tts,
@@ -261,11 +318,13 @@ with gr.Blocks() as app_tts:
             ref_text_input,
             gen_text_input,
             remove_silence,
+            randomize_seed,
+            seed_input,
             cross_fade_duration_slider,
             nfe_slider,
             speed_slider,
         ],
-        outputs=[audio_output, spectrogram_output, ref_text_input],
+        outputs=[audio_output, spectrogram_output, ref_text_input, seed_input],
     )
 
 
@@ -300,30 +359,30 @@ with gr.Blocks() as app_multistyle:
         """
     # Multiple Speech-Type Generation
 
-    This section allows you to generate multiple speech types or multiple people's voices. Enter your text in the format shown below, and the system will generate speech using the appropriate type. If unspecified, the model will use the regular speech type. The current speech type will be used until the next speech type is specified.
+    This section allows you to generate multiple speech types or multiple people's voices. Enter your text in the format shown below, or upload a .txt file with the same format. The system will generate speech using the appropriate type. If unspecified, the model will use the regular speech type. The current speech type will be used until the next speech type is specified.
     """
     )
 
     with gr.Row():
         gr.Markdown(
             """
-            **Example Input:**                                                                      
-            {Regular} Hello, I'd like to order a sandwich please.                                                         
-            {Surprised} What do you mean you're out of bread?                                                                      
-            {Sad} I really wanted a sandwich though...                                                              
-            {Angry} You know what, darn you and your little shop!                                                                       
-            {Whisper} I'll just go back home and cry now.                                                                           
-            {Shouting} Why me?!                                                                         
+            **Example Input:**
+            {Regular} Hello, I'd like to order a sandwich please.
+            {Surprised} What do you mean you're out of bread?
+            {Sad} I really wanted a sandwich though...
+            {Angry} You know what, darn you and your little shop!
+            {Whisper} I'll just go back home and cry now.
+            {Shouting} Why me?!
             """
         )
 
         gr.Markdown(
             """
-            **Example Input 2:**                                                                                
-            {Speaker1_Happy} Hello, I'd like to order a sandwich please.                                                            
-            {Speaker2_Regular} Sorry, we're out of bread.                                                                                
-            {Speaker1_Sad} I really wanted a sandwich though...                                                                             
-            {Speaker2_Whisper} I'll give you the last one I was hiding.                                                                     
+            **Example Input 2:**
+            {Speaker1_Happy} Hello, I'd like to order a sandwich please.
+            {Speaker2_Regular} Sorry, we're out of bread.
+            {Speaker1_Sad} I really wanted a sandwich though...
+            {Speaker2_Whisper} I'll give you the last one I was hiding.
             """
         )
 
@@ -333,11 +392,15 @@ with gr.Blocks() as app_multistyle:
 
     # Regular speech type (mandatory)
     with gr.Row() as regular_row:
-        with gr.Column():
+        with gr.Column(scale=1, min_width=160):
             regular_name = gr.Textbox(value="Regular", label="Speech Type Name")
             regular_insert = gr.Button("Insert Label", variant="secondary")
-        regular_audio = gr.Audio(label="Regular Reference Audio", type="filepath")
-        regular_ref_text = gr.Textbox(label="Reference Text (Regular)", lines=2)
+        with gr.Column(scale=3):
+            regular_audio = gr.Audio(label="Regular Reference Audio", type="filepath")
+        with gr.Column(scale=3):
+            regular_ref_text = gr.Textbox(label="Reference Text (Regular)", lines=8, scale=3)
+        with gr.Column(scale=1):
+            regular_ref_text_file = gr.File(label="Load Reference Text from File (.txt)", file_types=[".txt"], scale=1)
 
     # Regular speech type (max 100)
     max_speech_types = 100
@@ -345,22 +408,30 @@ with gr.Blocks() as app_multistyle:
     speech_type_names = [regular_name]
     speech_type_audios = [regular_audio]
     speech_type_ref_texts = [regular_ref_text]
+    speech_type_ref_text_files = [regular_ref_text_file]
     speech_type_delete_btns = [None]
     speech_type_insert_btns = [regular_insert]
 
     # Additional speech types (99 more)
     for i in range(max_speech_types - 1):
         with gr.Row(visible=False) as row:
-            with gr.Column():
+            with gr.Column(scale=1, min_width=160):
                 name_input = gr.Textbox(label="Speech Type Name")
                 delete_btn = gr.Button("Delete Type", variant="secondary")
                 insert_btn = gr.Button("Insert Label", variant="secondary")
-            audio_input = gr.Audio(label="Reference Audio", type="filepath")
-            ref_text_input = gr.Textbox(label="Reference Text", lines=2)
+            with gr.Column(scale=3):
+                audio_input = gr.Audio(label="Reference Audio", type="filepath")
+            with gr.Column(scale=3):
+                ref_text_input = gr.Textbox(label="Reference Text", lines=8, scale=3)
+            with gr.Column(scale=1):
+                ref_text_file_input = gr.File(
+                    label="Load Reference Text from File (.txt)", file_types=[".txt"], scale=1
+                )
         speech_type_rows.append(row)
         speech_type_names.append(name_input)
         speech_type_audios.append(audio_input)
         speech_type_ref_texts.append(ref_text_input)
+        speech_type_ref_text_files.append(ref_text_file_input)
         speech_type_delete_btns.append(delete_btn)
         speech_type_insert_btns.append(insert_btn)
 
@@ -385,21 +456,43 @@ with gr.Blocks() as app_multistyle:
 
     # Function to delete a speech type
     def delete_speech_type_fn():
-        return gr.update(visible=False), None, None, None
+        return gr.update(visible=False), None, None, None, None
 
-    # Update delete button clicks
+    # Update delete button clicks and ref text file changes
     for i in range(1, len(speech_type_delete_btns)):
         speech_type_delete_btns[i].click(
             delete_speech_type_fn,
-            outputs=[speech_type_rows[i], speech_type_names[i], speech_type_audios[i], speech_type_ref_texts[i]],
+            outputs=[
+                speech_type_rows[i],
+                speech_type_names[i],
+                speech_type_audios[i],
+                speech_type_ref_texts[i],
+                speech_type_ref_text_files[i],
+            ],
+        )
+        speech_type_ref_text_files[i].upload(
+            load_text_from_file,
+            inputs=[speech_type_ref_text_files[i]],
+            outputs=[speech_type_ref_texts[i]],
         )
 
-    # Text input for the prompt
-    gen_text_input_multistyle = gr.Textbox(
-        label="Text to Generate",
-        lines=10,
-        placeholder="Enter the script with speaker names (or emotion types) at the start of each block, e.g.:\n\n{Regular} Hello, I'd like to order a sandwich please.\n{Surprised} What do you mean you're out of bread?\n{Sad} I really wanted a sandwich though...\n{Angry} You know what, darn you and your little shop!\n{Whisper} I'll just go back home and cry now.\n{Shouting} Why me?!",
+    # Update regular speech type ref text file
+    regular_ref_text_file.upload(
+        load_text_from_file,
+        inputs=[regular_ref_text_file],
+        outputs=[regular_ref_text],
     )
+
+    # Text input for the prompt
+    with gr.Row():
+        gen_text_input_multistyle = gr.Textbox(
+            label="Text to Generate",
+            lines=10,
+            max_lines=40,
+            scale=4,
+            placeholder="Enter the script with speaker names (or emotion types) at the start of each block, e.g.:\n\n{Regular} Hello, I'd like to order a sandwich please.\n{Surprised} What do you mean you're out of bread?\n{Sad} I really wanted a sandwich though...\n{Angry} You know what, darn you and your little shop!\n{Whisper} I'll just go back home and cry now.\n{Shouting} Why me?!",
+        )
+        gen_text_file_multistyle = gr.File(label="Load Text to Generate from File (.txt)", file_types=[".txt"], scale=1)
 
     def make_insert_speech_type_fn(index):
         def insert_speech_type_fn(current_text, speech_type_name):
@@ -421,6 +514,7 @@ with gr.Blocks() as app_multistyle:
     with gr.Accordion("Advanced Settings", open=False):
         remove_silence_multistyle = gr.Checkbox(
             label="Remove Silences",
+            info="Turn on to automatically detect and crop long silences.",
             value=True,
         )
 
@@ -429,6 +523,12 @@ with gr.Blocks() as app_multistyle:
 
     # Output audio
     audio_output_multistyle = gr.Audio(label="Synthesized Audio")
+
+    gen_text_file_multistyle.upload(
+        load_text_from_file,
+        inputs=[gen_text_file_multistyle],
+        outputs=[gen_text_input_multistyle],
+    )
 
     @gpu_decorator
     def generate_multistyle_speech(
@@ -476,9 +576,12 @@ with gr.Blocks() as app_multistyle:
                 return [None] + [speech_types[style]["ref_text"] for style in speech_types]
             ref_text = speech_types[current_style].get("ref_text", "")
 
+            # TODO. Attribute each type a unique seed (maybe also speed, pseudo-feature for #730 #813)
+            seed = np.random.randint(0, 2**31 - 1)
+
             # Generate speech for this segment
             audio_out, _, ref_text_out = infer(
-                ref_audio, ref_text, text, tts_model_choice, remove_silence, 0, show_info=print
+                ref_audio, ref_text, text, tts_model_choice, remove_silence, seed, 0, show_info=print
             )  # show_info=print no pull to top when generating
             sr, audio_data = audio_out
 
@@ -544,10 +647,10 @@ with gr.Blocks() as app_chat:
     gr.Markdown(
         """
 # Voice Chat
-Have a conversation with an AI using your reference voice! 
-1. Upload a reference audio clip and optionally its transcript.
+Have a conversation with an AI using your reference voice!
+1. Upload a reference audio clip and optionally its transcript (via text or .txt file).
 2. Load the chat model.
-3. Record your message through your microphone.
+3. Record your message through your microphone or type it.
 4. The AI will respond using the reference voice.
 """
     )
@@ -603,14 +706,27 @@ Have a conversation with an AI using your reference voice!
                 ref_audio_chat = gr.Audio(label="Reference Audio", type="filepath")
             with gr.Column():
                 with gr.Accordion("Advanced Settings", open=False):
+                    with gr.Row():
+                        ref_text_chat = gr.Textbox(
+                            label="Reference Text",
+                            info="Optional: Leave blank to auto-transcribe",
+                            lines=2,
+                            scale=3,
+                        )
+                        ref_text_file_chat = gr.File(
+                            label="Load Reference Text from File (.txt)", file_types=[".txt"], scale=1
+                        )
+                    with gr.Row():
+                        randomize_seed_chat = gr.Checkbox(
+                            label="Randomize Seed",
+                            value=True,
+                            info="Uncheck to use the seed specified.",
+                            scale=3,
+                        )
+                        seed_input_chat = gr.Number(show_label=False, value=0, precision=0, scale=1)
                     remove_silence_chat = gr.Checkbox(
                         label="Remove Silences",
                         value=True,
-                    )
-                    ref_text_chat = gr.Textbox(
-                        label="Reference Text",
-                        info="Optional: Leave blank to auto-transcribe",
-                        lines=2,
                     )
                     system_prompt_chat = gr.Textbox(
                         label="System Prompt",
@@ -618,7 +734,7 @@ Have a conversation with an AI using your reference voice!
                         lines=2,
                     )
 
-        chatbot_interface = gr.Chatbot(label="Conversation")
+        chatbot_interface = gr.Chatbot(label="Conversation", type="messages")
 
         with gr.Row():
             with gr.Column():
@@ -635,48 +751,51 @@ Have a conversation with an AI using your reference voice!
                 send_btn_chat = gr.Button("Send Message")
                 clear_btn_chat = gr.Button("Clear Conversation")
 
-        conversation_state = gr.State(
-            value=[
-                {
-                    "role": "system",
-                    "content": "You are not an AI assistant, you are whoever the user says you are. You must stay in character. Keep your responses concise since they will be spoken out loud.",
-                }
-            ]
-        )
-
-        # Modify process_audio_input to use model and tokenizer from state
+        # Modify process_audio_input to generate user input
         @gpu_decorator
-        def process_audio_input(audio_path, text, history, conv_state):
+        def process_audio_input(conv_state, audio_path, text):
             """Handle audio or text input from user"""
 
             if not audio_path and not text.strip():
-                return history, conv_state, ""
+                return conv_state
 
             if audio_path:
                 text = preprocess_ref_audio_text(audio_path, text)[1]
-
             if not text.strip():
-                return history, conv_state, ""
+                return conv_state
 
             conv_state.append({"role": "user", "content": text})
-            history.append((text, None))
+            return conv_state
 
-            response = generate_response(conv_state, chat_model_state, chat_tokenizer_state)
+        # Use model and tokenizer from state to get text response
+        @gpu_decorator
+        def generate_text_response(conv_state, system_prompt):
+            """Generate text response from AI"""
+
+            system_prompt_state = [{"role": "system", "content": system_prompt}]
+            response = chat_model_inference(system_prompt_state + conv_state, chat_model_state, chat_tokenizer_state)
 
             conv_state.append({"role": "assistant", "content": response})
-            history[-1] = (text, response)
-
-            return history, conv_state, ""
+            return conv_state
 
         @gpu_decorator
-        def generate_audio_response(history, ref_audio, ref_text, remove_silence):
+        def generate_audio_response(conv_state, ref_audio, ref_text, remove_silence, randomize_seed, seed_input):
             """Generate TTS audio for AI response"""
-            if not history or not ref_audio:
-                return None
+            if not conv_state or not ref_audio:
+                return None, ref_text, seed_input
 
-            last_user_message, last_ai_response = history[-1]
-            if not last_ai_response:
-                return None
+            last_ai_response = conv_state[-1]["content"]
+            if not last_ai_response or conv_state[-1]["role"] != "assistant":
+                return None, ref_text, seed_input
+
+            # Determine the seed to use
+            if randomize_seed:
+                seed = np.random.randint(0, 2**31 - 1)
+            else:
+                seed = seed_input
+                if seed < 0 or seed > 2**31 - 1:
+                    gr.Warning("Seed must in range 0 ~ 2147483647. Using random seed instead.")
+                    seed = np.random.randint(0, 2**31 - 1)
 
             audio_result, _, ref_text_out = infer(
                 ref_audio,
@@ -684,83 +803,55 @@ Have a conversation with an AI using your reference voice!
                 last_ai_response,
                 tts_model_choice,
                 remove_silence,
+                seed=seed,
                 cross_fade_duration=0.15,
                 speed=1.0,
                 show_info=print,  # show_info=print no pull to top when generating
             )
-            return audio_result, ref_text_out
+            return audio_result, ref_text_out, seed
 
         def clear_conversation():
             """Reset the conversation"""
-            return [], [
-                {
-                    "role": "system",
-                    "content": "You are not an AI assistant, you are whoever the user says you are. You must stay in character. Keep your responses concise since they will be spoken out loud.",
-                }
-            ]
+            return [], None
 
-        def update_system_prompt(new_prompt):
-            """Update the system prompt and reset the conversation"""
-            new_conv_state = [{"role": "system", "content": new_prompt}]
-            return [], new_conv_state
-
-        # Handle audio input
-        audio_input_chat.stop_recording(
-            process_audio_input,
-            inputs=[audio_input_chat, text_input_chat, chatbot_interface, conversation_state],
-            outputs=[chatbot_interface, conversation_state],
-        ).then(
-            generate_audio_response,
-            inputs=[chatbot_interface, ref_audio_chat, ref_text_chat, remove_silence_chat],
-            outputs=[audio_output_chat, ref_text_chat],
-        ).then(
-            lambda: None,
-            None,
-            audio_input_chat,
+        ref_text_file_chat.upload(
+            load_text_from_file,
+            inputs=[ref_text_file_chat],
+            outputs=[ref_text_chat],
         )
 
-        # Handle text input
-        text_input_chat.submit(
-            process_audio_input,
-            inputs=[audio_input_chat, text_input_chat, chatbot_interface, conversation_state],
-            outputs=[chatbot_interface, conversation_state],
-        ).then(
-            generate_audio_response,
-            inputs=[chatbot_interface, ref_audio_chat, ref_text_chat, remove_silence_chat],
-            outputs=[audio_output_chat, ref_text_chat],
-        ).then(
-            lambda: None,
-            None,
-            text_input_chat,
-        )
+        for user_operation in [audio_input_chat.stop_recording, text_input_chat.submit, send_btn_chat.click]:
+            user_operation(
+                process_audio_input,
+                inputs=[chatbot_interface, audio_input_chat, text_input_chat],
+                outputs=[chatbot_interface],
+            ).then(
+                generate_text_response,
+                inputs=[chatbot_interface, system_prompt_chat],
+                outputs=[chatbot_interface],
+            ).then(
+                generate_audio_response,
+                inputs=[
+                    chatbot_interface,
+                    ref_audio_chat,
+                    ref_text_chat,
+                    remove_silence_chat,
+                    randomize_seed_chat,
+                    seed_input_chat,
+                ],
+                outputs=[audio_output_chat, ref_text_chat, seed_input_chat],
+            ).then(
+                lambda: [None, None],
+                None,
+                [audio_input_chat, text_input_chat],
+            )
 
-        # Handle send button
-        send_btn_chat.click(
-            process_audio_input,
-            inputs=[audio_input_chat, text_input_chat, chatbot_interface, conversation_state],
-            outputs=[chatbot_interface, conversation_state],
-        ).then(
-            generate_audio_response,
-            inputs=[chatbot_interface, ref_audio_chat, ref_text_chat, remove_silence_chat],
-            outputs=[audio_output_chat, ref_text_chat],
-        ).then(
-            lambda: None,
-            None,
-            text_input_chat,
-        )
-
-        # Handle clear button
-        clear_btn_chat.click(
-            clear_conversation,
-            outputs=[chatbot_interface, conversation_state],
-        )
-
-        # Handle system prompt change and reset conversation
-        system_prompt_chat.change(
-            update_system_prompt,
-            inputs=system_prompt_chat,
-            outputs=[chatbot_interface, conversation_state],
-        )
+        # Handle clear button or system prompt change and reset conversation
+        for user_operation in [clear_btn_chat.click, system_prompt_chat.change, chatbot_interface.clear]:
+            user_operation(
+                clear_conversation,
+                outputs=[chatbot_interface, audio_output_chat],
+            )
 
 
 with gr.Blocks() as app:
